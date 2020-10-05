@@ -198,11 +198,19 @@ impl Request {
 
         match self.headers.clone() {
             Some(headers) => {
+                let mut found_connec = false;
                 for (key, value) in headers.iter() {
+                    if *key == String::from("Connection") { found_connec = true; }
                     header_string.push_str(format!("{}: {}\r\n", key, value).as_str());
                 }
+
+                if !found_connec {
+                    header_string.push_str("Connection: keep-closed\r\n");
+                }
             },
-            None => {}
+            None => {
+                header_string.push_str("Connection: keep-closed\r\n");
+            }
         };
 
         self.request = format!(
