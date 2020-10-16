@@ -72,16 +72,8 @@ use std::io::BufReader;
 use url::{Url, ParseError};
 use native_tls::TlsConnector;
 use regex::Regex;
-use serde::{Serialize, Deserialize};
 
 fn main() { println!("goo goo gaa gaa"); }
-
-#[derive(Serialize, Deserialize)]
-struct OAuth {
-    access_token: String,
-    expires_in: usize,
-    token_type: String
-}
 
 enum HttpMethod {
     GET,
@@ -107,27 +99,41 @@ impl fmt::Display for HttpMethod {
     }
 }
 
-impl fmt::Display for Request {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let empty_hashmap: HashMap<String, String> = HashMap::new();
-        write!(f, "URL: {}\nQUERY: {:?}\nHEADERS: {:?}\nUSER AGENT: {}\nREQUEST: {}",
-            self.url,
-            self.query.as_ref().unwrap_or(&empty_hashmap),
-            self.headers.as_ref().unwrap_or(&empty_hashmap),
-            self.user_agent.as_ref().unwrap_or(&"".to_string()),
-            self.request
-        )
-    }
+trait Get {
+    type Response;
+    fn get(&mut self) -> Option<Self::Response>;
 }
 
-struct Request {
+trait Post {
+    type Response;
+    fn post(&mut self) -> Option<Self::Response>;
+}
+
+trait Put {
+    type Response;
+    fn put(&mut self) -> Option<Self::Response>;
+}
+
+trait Delete {
+    type Response;
+    fn delete(&mut self) -> Option<Self::Response>;
+}
+
+#[derive(Debug)]
+struct RequestConfig {
     url: url::Url,
     query: Option<HashMap<String, String>>,
     headers: Option<HashMap<String, String>>,
     user_agent: Option<String>,
+    raw_data: Option<String>
+}
+
+#[derive(Debug)]
+struct Request {
+    config: RequestConfig,
     request: String,
     host: String,
-    rt: String
+    request_type: String
 }
 
 #[derive(Debug)]
@@ -138,23 +144,79 @@ struct Response {
     body: String
 }
 
-impl Request {
-    pub fn new(url: &str, query: Option<HashMap<String, String>>, headers: Option<HashMap<String, String>>, user_agent: Option<String>) -> Result<Request, ParseError> {
-        let parsed_url = Url::parse(url)?;
-        Ok(Self {
-            url: parsed_url,
-            query,
-            headers,
-            user_agent,
+impl RequestConfig {
+    pub fn new<T, J, K, L, O, P>(
+        url: &str,
+        query: Option<HashMap<T, J>>,
+        headers: Option<HashMap<K, L>>,
+        user_agent: Option<O>,
+        raw_data: Option<P>
+    ) -> Result<Request, ParseError>
+    where
+        T: Into<String>,
+        J: Into<String>,
+        K: Into<String>,
+        L: Into<String>,
+        O: Into<String>,
+        P: Into<String>
+    {
+        let config = Self {
+            url: Url::parse(url)?,
+            query: {
+                match query {
+                    Some(generic_query) => {
+                        let mut string_query: HashMap<String, String> =  HashMap::new();
+                        for (key, value) in generic_query.into_iter() {
+                            string_query.insert(key.into(), value.into());
+                        }
+                        Some(string_query)
+                    },
+                    None => None
+                }
+            },
+            headers: {
+                match headers {
+                    Some(generic_headers) => {
+                        let mut string_headers: HashMap<String, String> =  HashMap::new();
+                        for (key, value) in generic_headers.into_iter() {
+                            string_headers.insert(key.into(), value.into());
+                        }
+                        Some(string_headers)
+                    },
+                    None => None
+                }
+            },
+            user_agent: {
+                match user_agent {
+                    Some(generic_user_agent) => {
+                        Some(generic_user_agent.into())
+                    },
+                    None => None
+                }
+            },
+            raw_data: {
+                match raw_data {
+                    Some(generic_data) => {
+                        Some(generic_data.into())
+                    },
+                    None => None
+                }
+            }
+        };
+
+        Ok(Request {
+            config,
             request: String::new(),
             host: String::new(),
-            rt: String::new()
+            request_type: String::new()
         })
     }
+}
 
+impl Request {
     fn setup_request(&mut self, method: HttpMethod) {
-        let query = self.url.query();
-        let mut path_query = self.url.path().to_string();
+        let query = self.config.url.query();
+        let mut path_query = self.config.url.path().to_string();
         let mut alr_query = false;
         let mut header_string = String::new();
 
@@ -167,7 +229,7 @@ impl Request {
             false => {}
         };
 
-        match self.query.clone() {
+        match self.config.query.clone() {
             Some(query_map) => {
                 match alr_query {
                     true => {},
@@ -188,7 +250,7 @@ impl Request {
             None => {}
         };
 
-        match self.url.host_str() {
+        match self.config.url.host_str() {
             Some(host) => {
                 self.host = host.to_string();
             },
@@ -196,7 +258,7 @@ impl Request {
         };
 
 
-        match self.headers.clone() {
+        match self.config.headers.clone() {
             Some(headers) => {
                 let mut found_connec = false;
                 for (key, value) in headers.iter() {
@@ -223,7 +285,7 @@ impl Request {
     }
 
     fn send_request(&self) -> Option<Response> {
-        let port: u16 = if self.url.scheme() == "https" { 443 } else { 80 };
+        let port: u16 = if self.config.url.scheme() == "https" { 443 } else { 80 };
         let address = format!("{}:{}", self.host, port);
         match port {
             443 => {
@@ -287,8 +349,14 @@ impl Request {
 
         if status_code.eq("301") {
             let location = headers.get("Location").expect("Could not get Location header.");
-            let mut request = Request::new(location, self.query.clone(), self.headers.clone(), self.user_agent.clone()).unwrap();
-            match self.rt.as_str() {
+            let mut request = RequestConfig::new::<String,String,String,String,String,String>(
+                location,
+                self.config.query.clone(),
+                self.config.headers.clone(),
+                self.config.user_agent.clone(),
+                None
+            ).unwrap();
+            match self.request_type.as_str() {
                 "GET" => return request.get(),
                 "POST" => return request.post(),
                 "PUT" => return request.put(),
@@ -304,27 +372,43 @@ impl Request {
             body
         })
     }
+}
 
-    pub fn get(&mut self) -> Option<Response> {
-        self.rt = String::from("GET");
+impl Get for Request {
+    type Response = Response;
+
+    fn get(&mut self) -> Option<Response> {
+        self.request_type = String::from("GET");
         self.setup_request(HttpMethod::GET);
         self.send_request()
     }
+}
 
-    pub fn post(&mut self) -> Option<Response> {
-        self.rt = String::from("POST");
+impl Post for Request {
+    type Response = Response;
+
+    fn post(&mut self) -> Option<Response> {
+        self.request_type = String::from("POST");
         self.setup_request(HttpMethod::POST);
         self.send_request()
     }
+}
 
-    pub fn put(&mut self) -> Option<Response> {
-        self.rt = String::from("PUT");
+impl Put for Request {
+    type Response = Response;
+
+    fn put(&mut self) -> Option<Response> {
+        self.request_type = String::from("PUT");
         self.setup_request(HttpMethod::PUT);
         self.send_request()
     }
+}
 
-    pub fn delete(&mut self) -> Option<Response> {
-        self.rt = String::from("DELETE");
+impl Delete for Request {
+    type Response = Response;
+
+    fn delete(&mut self) -> Option<Response> {
+        self.request_type = String::from("DELETE");
         self.setup_request(HttpMethod::DELETE);
         self.send_request()
     }
@@ -335,36 +419,63 @@ impl Request {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde::{Serialize, Deserialize};
+
+    #[derive(Serialize, Deserialize)]
+    struct OAuth {
+        access_token: String,
+        expires_in: usize,
+        token_type: String
+    }
 
     #[test]
     fn basic_request() {
-        let mut client = Request::new("https://www.google.com", None, None, None).expect("Could not create new client.");
-        println!("{}", client);
-        client.get();
+        let mut client = RequestConfig::new::<&str, &str, &str, &str, &str, &str> (
+            "https://www.google.com",
+            None,
+            None,
+            None,
+            None
+        ).expect("Could not create new client.");
+        println!("{:?}", client);
+        // client.get();
     }
 
     #[test]
     fn query_check() {
-        let mut client_query_check_1 = Request::new("https://github.com/connorskees/requests/blob/master/src/request.rs", None, None, None).expect("Could not create new client.");
+        let mut client_query_check_1 = RequestConfig::new::<&str, &str, &str, &str, &str, &str> (
+            "https://github.com/connorskees/requests/blob/master/src/request.rs",
+            None,
+            None,
+            None,
+            None
+        ).expect("Could not create new client.");
         client_query_check_1.get();
 
-        let mut query_map: HashMap<String, String> = HashMap::new();
-        query_map.insert("p".to_string(), "1868080".to_string());
-        let mut client_query_check_2 = Request::new("https://www.pearsonitcertification.com/articles/article.aspx", Some(query_map), None, None).expect("Could not create new client.");
+        let mut query_map: HashMap<&str, &str> = HashMap::new();
+        query_map.insert("p", "1868080");
+        let mut client_query_check_2 = RequestConfig::new::<&str, &str, &str, &str, &str, &str> (
+            "https://www.pearsonitcertification.com/articles/article.aspx",
+            Some(query_map),
+            None,
+            None,
+            None
+        ).expect("Could not create new client.");
         client_query_check_2.get();
     }
 
     #[test]
     fn header_check() {
         let auth_url = "https://id.twitch.tv/oauth2/token";
-        let mut auth_query_map: HashMap<String, String> = HashMap::new();
-        auth_query_map.insert("client_id".to_string(), "pyyp94iz0diuih4qzncipdzsd6ovj4".to_string());
-        auth_query_map.insert("client_secret".to_string(), "2m98yduy852d6iebpietc96kckdj4d".to_string());
-        auth_query_map.insert("grant_type".to_string(), "client_credentials".to_string());
+        let mut auth_query_map: HashMap<&str, &str> = HashMap::new();
+        auth_query_map.insert("client_id", "pyyp94iz0diuih4qzncipdzsd6ovj4");
+        auth_query_map.insert("client_secret", "2m98yduy852d6iebpietc96kckdj4d");
+        auth_query_map.insert("grant_type", "client_credentials");
 
-        let response = Request::new(
+        let response = RequestConfig::new::<&str, &str, &str, &str, &str, &str> (
             auth_url,
             Some(auth_query_map),
+            None,
             None,
             None
         ).expect("Could not connect").post().expect("Couldn't get response.");
@@ -374,16 +485,18 @@ mod tests {
         let oauth_json: OAuth = serde_json::from_str(&response.body).expect("Can't parse JSON");
 
         let url = "https://api.twitch.tv/helix/streams";
-        let mut headers_map: HashMap<String, String> = HashMap::new();
-        headers_map.insert("Authorization".to_string(), format!("Bearer {}", oauth_json.access_token));
-        headers_map.insert("Client-Id".to_string(), "pyyp94iz0diuih4qzncipdzsd6ovj4".to_string());
-        let get_streams = Request::new(
+        let mut headers_map: HashMap<&str, &str> = HashMap::new();
+        let token = format!("Bearer {}", oauth_json.access_token);
+        headers_map.insert("Authorization", token.as_str());
+        headers_map.insert("Client-Id", "pyyp94iz0diuih4qzncipdzsd6ovj4");
+        let get_streams = RequestConfig::new::<&str, &str, &str, &str, &str, &str> (
             url,
             None,
             Some(headers_map),
+            None,
             None
         ).expect("Could not connect").get().expect("Couldn't get response.");
 
-        eprintln!("{}", get_streams.body);
+        eprintln!("{:?}", get_streams.body);
     }
 }
